@@ -4,7 +4,7 @@
 
 import { FIELD, MS_TO_KT, M_TO_FT, PALETTE, FONT, PLANE } from './config.js';
 import { forwardVector } from './aircraft.js';
-import { nextRing } from './missions.js';
+import { MISSIONS, medalFor, nextRing } from './missions.js';
 
 /** Clamp a value into [min, max]. */
 function clamp(value, min, max) {
@@ -136,7 +136,9 @@ export function createRenderer(canvas) {
   const context = canvas.getContext('2d');
   const W = FIELD.width;
   const H = FIELD.height;
-  const focal = (H / 2) / Math.tan((70 * Math.PI) / 360);
+  /** The projection's focal length; draw() widens it with speed (dynamic FOV). */
+  const BASE_FOCAL = (H / 2) / Math.tan((70 * Math.PI) / 360);
+  let focal = BASE_FOCAL;
 
   /** The chase camera: behind the plane, banked a little with it. */
   function buildCamera(plane) {
@@ -173,11 +175,17 @@ export function createRenderer(canvas) {
   }
 
   /** The sky: a gradient, the sun, and a few high clouds painted in screen space. */
-  function drawSky(camera, plane) {
+  function drawSky(camera, plane, storm = false) {
     const gradient = context.createLinearGradient(0, 0, 0, H);
-    gradient.addColorStop(0, PALETTE.skyTop);
-    gradient.addColorStop(0.55, PALETTE.skyMid);
-    gradient.addColorStop(1, PALETTE.skyLow);
+    if (storm) {
+      gradient.addColorStop(0, '#26343f');
+      gradient.addColorStop(0.55, '#51626f');
+      gradient.addColorStop(1, '#8fa3ae');
+    } else {
+      gradient.addColorStop(0, PALETTE.skyTop);
+      gradient.addColorStop(0.55, PALETTE.skyMid);
+      gradient.addColorStop(1, PALETTE.skyLow);
+    }
     context.fillStyle = gradient;
     context.fillRect(0, 0, W, H);
     const sunPoint = project(camera, {
@@ -185,7 +193,7 @@ export function createRenderer(canvas) {
       y: camera.position.y + 900,
       z: camera.position.z + 2600,
     });
-    if (sunPoint && sunPoint.d > 0) {
+    if (sunPoint && sunPoint.d > 0 && !storm) {
       const glow = context.createRadialGradient(sunPoint.x, sunPoint.y, 4, sunPoint.x, sunPoint.y, 90);
       glow.addColorStop(0, 'rgba(255,243,196,0.95)');
       glow.addColorStop(0.25, 'rgba(255,243,196,0.55)');
@@ -297,6 +305,17 @@ export function createRenderer(canvas) {
         context.lineTo(d.x, d.y);
         context.closePath();
         context.fill();
+        // Edge lights: a warm dot on each corner of the segment, so the strip
+        // reads as a place to land long before its paint does.
+        for (const edgeX of [-16.5, 16.5]) {
+          const dot = project(camera, { x: edgeX, y: 0.7, z });
+          if (dot && dot.d < 1200) {
+            context.fillStyle = 'rgba(255,214,140,0.9)';
+            context.beginPath();
+            context.arc(dot.x, dot.y, clamp(500 / dot.d, 1, 3.4), 0, Math.PI * 2);
+            context.fill();
+          }
+        }
         if (Math.floor(z / 40) % 2 === 0) {
           const e = project(camera, { x: -1.2, y: 0.5, z: z + 8 });
           const f = project(camera, { x: 1.2, y: 0.5, z: z + 8 });
@@ -326,7 +345,7 @@ export function createRenderer(canvas) {
   }
 
   /** Clouds: soft white billboards that drift with the valley, drawn far to near. */
-  function drawClouds(camera, terrain) {
+  function drawClouds(camera, terrain, storm = false) {
     const visible = [];
     for (const cloud of terrain.clouds) {
       const point = project(camera, { x: cloud.x, y: cloud.y, z: cloud.z });
@@ -338,7 +357,8 @@ export function createRenderer(canvas) {
       if (size < 4) continue;
       const alpha = clamp(0.85 - point.d / 2600, 0.25, 0.85);
       // Each puff is its own ellipse, so overlaps blend instead of cusping.
-      context.fillStyle = `rgba(255,255,255,${alpha})`;
+      // In a storm the same clouds hang grey and heavy instead of white.
+      context.fillStyle = storm ? `rgba(74,88,100,${Math.min(0.95, alpha + 0.1)})` : `rgba(255,255,255,${alpha})`;
       const puffs = [
         [0, 0, 1, 0.42],
         [-0.5, 0.08, 0.6, 0.3],
@@ -629,8 +649,8 @@ export function createRenderer(canvas) {
   /** The gauges: throttle, fuel and airframe, plus the stall and fuel lamps. */
   function drawGauges(world, plane) {
     const x = W - 218;
-    const y = H - 122;
-    glassPanel(x, y, 198, 98, 'ENGINE');
+    const y = H - 134;
+    glassPanel(x, y, 198, 110, 'ENGINE');
     // Throttle bar.
     context.fillStyle = '#22303c';
     context.fillRect(x + 14, y + 26, 14, 56);
@@ -652,7 +672,8 @@ export function createRenderer(canvas) {
     context.fillRect(x + 14, y + 74, 170, 8);
     context.fillStyle = plane.integrity < 40 ? PALETTE.hudRed : PALETTE.hudAmber;
     context.fillRect(x + 14, y + 74, 170 * (plane.integrity / 100), 8);
-    context.fillText(`HULL ${Math.round(plane.integrity)}%`, x + 34, y + 90 - 6);
+    context.fillStyle = PALETTE.text;
+    context.fillText(`HULL ${Math.round(plane.integrity)}%`, x + 34, y + 96);
     // Warning lamps, one line at the top of the panel.
     const lamps = [];
     if (plane.stalled) lamps.push(['STALL', PALETTE.hudRed]);
@@ -666,6 +687,190 @@ export function createRenderer(canvas) {
       context.textAlign = 'right';
       context.fillText(lamps.map(([label]) => label).join('  ·  '), x + 184, y + 14);
     }
+  }
+
+  /**
+   * Rain, in screen space: a field of slanted streaks recycled by the clock,
+   * so a storm sortie is flown through weather, not just against wind numbers.
+   * Each drop's lane comes from a hash of its index — no state, no allocation.
+   */
+  function drawRain(now) {
+    context.save();
+    context.strokeStyle = 'rgba(198,220,236,0.38)';
+    context.lineWidth = 1.4;
+    context.beginPath();
+    for (let index = 0; index < 150; index += 1) {
+      const lane = latticeHash2(index, 31, 17);
+      const laneY = latticeHash2(index, 47, 19);
+      const x = lane * (W + 120) - 60 + Math.sin(index * 7.3) * 6;
+      const y = (laneY * H + now * (620 + lane * 260)) % (H + 40) - 20;
+      context.moveTo(x, y);
+      context.lineTo(x - 5, y + 15);
+    }
+    context.stroke();
+    context.restore();
+  }
+
+  /** Particles: projected points, fading as they age, sized by their world size. */
+  function drawParticles(camera, world) {
+    for (const p of world.particles.list) {
+      const point = project(camera, p);
+      if (!point || point.d < 4) continue;
+      const size = Math.max(1.2, (p.size / point.d) * focal);
+      const fade = 1 - p.age / p.life;
+      context.save();
+      context.globalAlpha = clamp(fade, 0, 1) * 0.9;
+      context.fillStyle = p.colour;
+      context.beginPath();
+      context.arc(point.x, point.y, size, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+    }
+  }
+
+  /** Floating score popups: born at a ring, they rise and fade over their life. */
+  function drawPopups(camera, world) {
+    for (const popup of world.popups) {
+      const age = world.time - popup.born;
+      const risen = { x: popup.x, y: popup.y + age * 7, z: popup.z };
+      const point = project(camera, risen);
+      if (!point || point.d < 6) continue;
+      const fade = clamp(1 - age / popup.life, 0, 1);
+      const size = clamp(3400 / point.d, 13, 30);
+      context.save();
+      context.globalAlpha = fade;
+      context.fillStyle = popup.colour;
+      context.font = `800 ${size}px ${FONT}`;
+      context.textAlign = 'center';
+      context.shadowColor = 'rgba(10,18,26,0.8)';
+      context.shadowBlur = 6;
+      context.fillText(popup.text, point.x, point.y);
+      context.restore();
+    }
+  }
+
+  /**
+   * Where the sortie wants the plane next: the next ring, or the far strip's
+   * touchdown zone once the rings are done. Null when there is nothing to aim at.
+   */
+  function currentTarget(world) {
+    const ring = nextRing(world.mission);
+    if (ring) return { x: ring.x, y: ring.y, z: ring.z, label: `RING ${world.mission.ringIndex + 1}`, kind: 'ring' };
+    if (world.mission.landing) {
+      const runway = world.mission.targetRunway;
+      return { x: 0, y: world.terrain.heightAt(0, runway.z) + 3, z: runway.z - 150, label: 'MERAPI STRIP', kind: 'strip' };
+    }
+    return null;
+  }
+
+  /**
+   * The guide: a diamond on the target when it is on screen, and an arrow on
+   * the screen's edge with the distance when it is not — a pilot (or a judge)
+   * is never left wondering where the sortie goes next.
+   */
+  function drawTargetGuide(camera, world) {
+    if (world.phase === 'done') return;
+    const target = currentTarget(world);
+    if (!target) return;
+    const plane = world.plane;
+    const distance = Math.hypot(target.x - plane.x, target.z - plane.z);
+    const distanceText = distance >= 1000 ? `${(distance / 1000).toFixed(1)} km` : `${Math.round(distance)} m`;
+    const point = project(camera, target);
+    const margin = 64;
+    const onScreen = point && point.x > margin && point.x < W - margin && point.y > margin && point.y < H - margin;
+    context.save();
+    if (onScreen) {
+      context.strokeStyle = PALETTE.hudAmber;
+      context.lineWidth = 2;
+      context.globalAlpha = 0.9;
+      const s = 11;
+      context.beginPath();
+      context.moveTo(point.x, point.y - s);
+      context.lineTo(point.x + s, point.y);
+      context.lineTo(point.x, point.y + s);
+      context.lineTo(point.x - s, point.y);
+      context.closePath();
+      context.stroke();
+      context.fillStyle = PALETTE.hudAmber;
+      context.font = `700 12px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText(`${target.label} · ${distanceText}`, clamp(point.x, 78, W - 78), point.y - s - 8);
+    } else {
+      // Direction in screen space; a target behind the camera flips the axis.
+      let dx = point ? point.x - W / 2 : (target.x - plane.x);
+      let dy = point ? point.y - H / 2 : -(target.y - plane.y);
+      if (point && point.d < 8) {
+        dx = target.x - plane.x;
+        dy = -(target.y - plane.y);
+      }
+      if (!point) {
+        dx = target.x - plane.x;
+        dy = -(target.y - plane.y);
+      }
+      const length = Math.hypot(dx, dy) || 1;
+      const ux = dx / length;
+      const uy = dy / length;
+      const cx = W / 2 + ux * (W / 2 - margin);
+      const cy = H / 2 + uy * (H / 2 - margin);
+      const angle = Math.atan2(uy, ux);
+      context.translate(cx, cy);
+      context.rotate(angle);
+      context.fillStyle = PALETTE.hudAmber;
+      context.beginPath();
+      context.moveTo(16, 0);
+      context.lineTo(-10, -10);
+      context.lineTo(-4, 0);
+      context.lineTo(-10, 10);
+      context.closePath();
+      context.fill();
+      context.rotate(-angle);
+      context.translate(-cx, -cy);
+      context.fillStyle = PALETTE.hudAmber;
+      context.font = `700 12px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText(`${target.label} · ${distanceText}`, cx, cy + 30);
+    }
+    context.restore();
+  }
+
+  /**
+   * PAPI glidepath lights beside the Merapi threshold, once the sortie is on
+   * final: four lamps that read white when high, red when low, two-and-two on
+   * the 3° slope — the same language real strips speak.
+   */
+  function drawPapi(camera, world) {
+    const mission = world.mission;
+    if (!mission.landing || nextRing(mission)) return;
+    const plane = world.plane;
+    if (plane.grounded) return;
+    const runway = mission.targetRunway;
+    const thresholdZ = runway.z - 150;
+    const distance = thresholdZ - plane.z;
+    if (distance < 60 || distance > 3400) return;
+    const groundY = world.terrain.heightAt(0, thresholdZ);
+    const glideAngle = Math.atan2(Math.max(0, plane.y - groundY), distance);
+    const onSlope = (3 * Math.PI) / 180;
+    const whites = glideAngle > onSlope + 0.014 ? 4 : glideAngle > onSlope + 0.005 ? 3 : glideAngle > onSlope - 0.005 ? 2 : glideAngle > onSlope - 0.014 ? 1 : 0;
+    for (let index = 0; index < 4; index += 1) {
+      const point = project(camera, { x: -24 - index * 3.2, y: groundY + 1.2, z: thresholdZ });
+      if (!point) continue;
+      const radius = clamp(900 / point.d, 2, 7);
+      context.save();
+      context.fillStyle = index < whites ? '#f5f2e8' : PALETTE.hudRed;
+      context.shadowColor = context.fillStyle;
+      context.shadowBlur = 8;
+      context.beginPath();
+      context.arc(point.x, point.y, radius, 0, Math.PI * 2);
+      context.fill();
+      context.restore();
+    }
+    // The verdict in words, under the compass: the slope, said plainly.
+    context.save();
+    context.fillStyle = whites >= 3 ? PALETTE.text : whites === 2 ? PALETTE.hudGreen : PALETTE.hudRed;
+    context.font = `700 13px ${FONT}`;
+    context.textAlign = 'center';
+    context.fillText(whites >= 3 ? 'HIGH — ease her down' : whites === 2 ? 'ON THE SLOPE' : 'LOW — add power', W / 2, 148);
+    context.restore();
   }
 
   /** The whole HUD: compass, tapes, attitude, gauges, mission and messages. */
@@ -732,6 +937,34 @@ export function createRenderer(canvas) {
       context.textAlign = 'center';
       context.fillText('STALL — NOSE DOWN, POWER UP', W / 2, 160);
     }
+    // The combo, while it lives: a streak is worth showing off.
+    if (mission.combo > 1) {
+      context.fillStyle = PALETTE.hudAmber;
+      context.font = `700 13px ${FONT}`;
+      context.textAlign = 'left';
+      context.fillText(`COMBO ×${Math.min(2, 1 + 0.25 * (mission.combo - 1)).toFixed(2).replace(/\.?0+$/, '')} — ${mission.combo} rings in a row`, 26, 108);
+    }
+    // First-seconds coaching: how to get off the ground, said once, plainly.
+    if (plane.grounded && plane.speed < PLANE.stallSpeed && mission.elapsed < 30) {
+      context.fillStyle = 'rgba(16,24,32,0.7)';
+      context.beginPath();
+      context.roundRect(W / 2 - 250, H - 120, 500, 36, 8);
+      context.fill();
+      context.fillStyle = PALETTE.text;
+      context.font = `700 15px ${FONT}`;
+      context.textAlign = 'center';
+      context.fillText('THROTTLE UP — hold SHIFT · pull ↑ gently at 55 kt', W / 2, H - 97);
+    }
+    // On final without flaps is a fast arrival: say so before the strip does.
+    if (mission.landing && !nextRing(mission) && !plane.grounded && !plane.flaps) {
+      const distance = mission.targetRunway.z - plane.z;
+      if (distance > 0 && distance < 3000) {
+        context.fillStyle = PALETTE.hudAmber;
+        context.font = `700 13px ${FONT}`;
+        context.textAlign = 'center';
+        context.fillText('ON FINAL — flaps G · slow below 90 kt · aim for the PAPI lights', W / 2, 172);
+      }
+    }
   }
 
   /** The title screen: the game, its three sorties, and how to fly. */
@@ -745,22 +978,23 @@ export function createRenderer(canvas) {
     context.fillStyle = PALETTE.hudAmber;
     context.font = `600 20px ${FONT}`;
     context.fillText('A bush-plane courier over the Merapi valley — fly it like you mean it.', W / 2, 164);
-    const cards = [
-      { key: '1', name: 'RING RUN', tag: '8 rings · beat the clock' },
-      { key: '2', name: 'VALLEY LANDING', tag: 'Take off · fly 8 km · land it' },
-      { key: '3', name: 'STORM COURIER', tag: '5 rings + landing · gusts · tight fuel' },
-    ];
+    const cards = MISSIONS.map((mission, index) => ({
+      key: String(index + 1),
+      name: mission.name,
+      tag: mission.tag,
+    }));
     cards.forEach((card, index) => {
-      const x = W / 2 - 330 + index * 230;
+      const x = W / 2 - 462 + index * 238;
       const y = 220;
-      glassPanel(x, y, 210, 110, `${card.key} — ${card.name}`);
+      glassPanel(x, y, 218, 110, `${card.key} — ${card.name}`);
       context.fillStyle = PALETTE.muted;
-      context.font = `600 13px ${FONT}`;
+      context.font = `600 12px ${FONT}`;
       context.textAlign = 'left';
-      context.fillText(card.tag, x + 10, y + 52);
+      const tag = card.tag.length > 40 ? `${card.tag.slice(0, 39)}…` : card.tag;
+      context.fillText(tag, x + 10, y + 52);
       context.fillStyle = PALETTE.hudCyan;
       context.font = `600 12px ${FONT}`;
-      context.fillText('Press ' + card.key + ' or click', x + 10, y + 92);
+      context.fillText('Press ' + card.key + (index === 0 ? ' or click' : ''), x + 10, y + 92);
     });
     context.fillStyle = PALETTE.text;
     context.font = `600 15px ${FONT}`;
@@ -794,9 +1028,16 @@ export function createRenderer(canvas) {
     context.fillStyle = PALETTE.hudAmber;
     context.font = `800 26px ${FONT}`;
     context.fillText(`SCORE ${outcome.score}`, W / 2, 350);
+    // A finished sortie earns its medal: the grade is the chase between runs.
+    const medal = outcome.type === 'rings' || outcome.type === 'landed' ? medalFor(world.mission.id, outcome.score) : null;
+    if (medal) {
+      context.fillStyle = medal.colour;
+      context.font = `800 19px ${FONT}`;
+      context.fillText(`★ ${medal.name} STANDARD`, W / 2, 378);
+    }
     context.fillStyle = PALETTE.muted;
     context.font = `600 15px ${FONT}`;
-    context.fillText(`BEST ${Math.max(best, outcome.score)}`, W / 2, 380);
+    context.fillText(`BEST ${Math.max(best, outcome.score)}`, W / 2, 402);
     context.fillStyle = PALETTE.text;
     context.font = `600 15px ${FONT}`;
     context.fillText('Press R or click to fly again', W / 2, 420);
@@ -805,17 +1046,42 @@ export function createRenderer(canvas) {
   /** Paint one frame: the world, the plane, the HUD, and the screen over it. */
   function draw(world, screen, best, now) {
     const plane = world.plane;
+    // Speed opens the lens: the faster she flies, the wider the world feels.
+    focal = BASE_FOCAL * (1 - clamp((plane.speed - 45) / 500, 0, 0.13));
     const camera = buildCamera(plane);
     context.save();
-    drawSky(camera, plane);
+    // Trauma shakes the world, never the instruments: a scrape rattles the
+    // view for a moment, a crash for longer.
+    if (world.trauma > 0.01) {
+      const shake = world.trauma * world.trauma * 13;
+      context.translate(Math.sin(now * 121.7) * shake, Math.cos(now * 149.3) * shake * 0.7);
+    }
+    const storm = world.mission.gusts;
+    drawSky(camera, plane, storm);
     drawDistantPeaks(camera, plane, world.terrain);
     drawTerrain(camera, plane, world.terrain);
     drawRiver(camera, plane, world.terrain);
     drawRunways(camera, world.terrain);
-    drawClouds(camera, world.terrain);
+    drawClouds(camera, world.terrain, storm);
     drawRings(camera, world);
     drawPlane(camera, plane, now);
+    drawParticles(camera, world);
+    drawPopups(camera, world);
+    drawTargetGuide(camera, world);
+    drawPapi(camera, world);
     context.restore();
+    if (storm && screen === 'play') {
+      drawRain(now);
+      // A bolt lights the whole valley for a frame or two after it strikes.
+      const sinceBolt = world.time - world.boltAt;
+      if (sinceBolt >= 0 && sinceBolt < 0.13) {
+        context.fillStyle = 'rgba(230,238,255,0.20)';
+        context.fillRect(0, 0, W, H);
+      } else if (sinceBolt >= 0.2 && sinceBolt < 0.3) {
+        context.fillStyle = 'rgba(230,238,255,0.10)';
+        context.fillRect(0, 0, W, H);
+      }
+    }
     if (screen === 'title') {
       drawTitleScreen(world, best);
     } else if (screen === 'paused') {

@@ -39,7 +39,47 @@ export const MISSIONS = [
     timeLimit: 320,
     gusts: true,
   },
+  {
+    id: 'stormrings',
+    name: 'STORM RINGS',
+    tag: '8 rings · storm · against the clock',
+    brief: 'The full ring course in the weather the courier fears: all 8 rings with the storm shoving at the wings and a clock that will not wait.',
+    rings: RINGS.count,
+    landing: false,
+    fuel: 90,
+    timeLimit: 235,
+    gusts: true,
+  },
 ];
+
+/**
+ * The medal a finished sortie earns, by its score against the mission's par.
+ * Pars are set from what a clean, well-flown run scores: ACE asks for
+ * bullseyes and a held combo, BRONZE only asks that the sortie be finished.
+ */
+export const MEDALS = [
+  { name: 'ACE', colour: '#ffd75e' },
+  { name: 'GOLD', colour: '#ffb02e' },
+  { name: 'SILVER', colour: '#cfd8dc' },
+  { name: 'BRONZE', colour: '#cd8f52' },
+];
+
+export const PARS = {
+  rings: [2150, 1750, 1150, 650],
+  landing: [600, 520, 400, 250],
+  courier: [1650, 1400, 1000, 550],
+  stormrings: [2250, 1750, 1150, 600],
+};
+
+/** The medal for a score on a mission, or null when it earns none. */
+export function medalFor(missionId, score) {
+  const par = PARS[missionId];
+  if (!par) return null;
+  for (let index = 0; index < par.length; index += 1) {
+    if (score >= par[index]) return MEDALS[index];
+  }
+  return null;
+}
 
 /** Build one mission's live state: its rings, its clock and its start position. */
 export function buildMission(mission, terrain) {
@@ -58,6 +98,8 @@ export function buildMission(mission, terrain) {
     gusts: mission.gusts,
     elapsed: 0,
     score: 0,
+    combo: 0,
+    bestCombo: 0,
     targetRunway: terrain.runways[1],
     startRunway: terrain.runways[0],
   };

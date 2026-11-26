@@ -5,6 +5,7 @@
 import { COURSE, DAMAGE, LANDING, PLANE, STEP } from './config.js';
 import { createAircraft, landingQuality, stepAircraft } from './aircraft.js';
 import { buildMission, nextRing, overRunway } from './missions.js';
+import { createParticles, spawnBurst, spawnDust, stepParticles } from './particles.js';
 
 export const EVENT_RING = 1;
 export const EVENT_SCRAPE = 2;
@@ -14,6 +15,7 @@ export const EVENT_FUEL = 16;
 export const EVENT_COMPLETE = 32;
 export const EVENT_TIME = 64;
 export const EVENT_STALL = 128;
+export const EVENT_BOLT = 256;
 
 /** Clamp a value into [min, max]. */
 function clamp(value, min, max) {
@@ -44,6 +46,12 @@ export function createWorld(terrain, missionDef) {
     messageUntil: 0,
     time: 0,
     stallWarnedAt: -10,
+    particles: createParticles(),
+    popups: [],
+    trauma: 0,
+    hitStop: 0,
+    boltAt: -10,
+    nextBolt: 6 + Math.random() * 10,
   };
 }
 
@@ -153,9 +161,30 @@ export function stepWorld(world, stick, throttleDelta, dt = STEP) {
   world.time += dt;
   mission.elapsed += dt;
 
+  // Garnish with a clock of its own: sparks age, score popups float and fade,
+  // and the camera's shake (trauma) bleeds off a little every step.
+  stepParticles(world.particles, dt);
+  world.trauma = Math.max(0, world.trauma - dt * 1.5);
+  for (let index = world.popups.length - 1; index >= 0; index -= 1) {
+    if (world.time - world.popups[index].born > world.popups[index].life) world.popups.splice(index, 1);
+  }
+
+  // A fast ground roll throws dust off the wheels, a few puffs a second.
+  if (plane.grounded && plane.speed > 14 && Math.random() < 0.35) {
+    spawnDust(world.particles, plane.x, plane.y - 0.6, plane.z - 2, { count: 2, spread: 3.5, life: 0.9 });
+  }
+
   const gust = gustAt(world);
   const previousZ = plane.z;
   stepAircraft(plane, stick, throttleDelta, gust, dt);
+
+  // Storm lightning: a bolt every nine to twenty seconds while the weather
+  // is up — the renderer flashes on boltAt, the loop thunders on the event.
+  if (mission.gusts && world.time >= world.nextBolt) {
+    world.boltAt = world.time;
+    world.nextBolt = world.time + 9 + Math.random() * 11;
+    events |= EVENT_BOLT;
+  }
 
   // The clock: a sortie that runs out of time ends, scored or not.
   if (mission.elapsed >= mission.timeLimit) {
@@ -179,9 +208,34 @@ export function stepWorld(world, stick, throttleDelta, dt = STEP) {
     if (Math.hypot(dx, dy) <= ring.radius) {
       ring.passed = true;
       mission.ringIndex += 1;
-      mission.score += 100;
+      // The cleaner the threading, the richer the ring: a dead-centre pass is
+      // worth half as much again, and consecutive rings build a combo that
+      // multiplies the whole award — up to double for a perfect streak.
+      const offset = Math.hypot(dx, dy) / ring.radius;
+      const centreBonus = Math.round((1 - offset) * 50);
+      mission.combo += 1;
+      mission.bestCombo = Math.max(mission.bestCombo, mission.combo);
+      const multiplier = Math.min(2, 1 + 0.25 * (mission.combo - 1));
+      const gained = Math.round((100 + centreBonus) * multiplier);
+      mission.score += gained;
       events |= EVENT_RING;
-      world.message = `RING ${mission.ringIndex}/${mission.rings.length}  +100`;
+      spawnBurst(world.particles, ring.x, ring.y, ring.z, {
+        count: 30,
+        colour: centreBonus >= 40 ? '#ffd75e' : '#ffb02e',
+        spread: 20,
+        life: 0.9,
+      });
+      world.popups.push({
+        x: ring.x,
+        y: ring.y + ring.radius * 0.4,
+        z: ring.z,
+        text: centreBonus >= 40 ? `+${gained} BULLSEYE` : `+${gained}`,
+        colour: centreBonus >= 40 ? '#ffd75e' : '#ffb02e',
+        born: world.time,
+        life: 1.15,
+      });
+      world.hitStop = 0.045;
+      world.message = `RING ${mission.ringIndex}/${mission.rings.length}  +${gained}${mission.combo > 1 ? `  ·  COMBO ×${multiplier.toFixed(2).replace(/\.?0+$/, '')}` : ''}${centreBonus >= 40 ? '  ·  BULLSEYE' : ''}`;
       world.messageUntil = world.time + 2;
       if (mission.ringIndex === mission.rings.length && !mission.landing) {
         world.phase = 'done';
@@ -189,7 +243,7 @@ export function stepWorld(world, stick, throttleDelta, dt = STEP) {
         world.outcome = {
           type: 'rings',
           title: 'COURSE COMPLETE',
-          detail: `All ${mission.rings.length} rings threaded with ${Math.round(mission.timeLimit - mission.elapsed)}s to spare.`,
+          detail: `All ${mission.rings.length} rings threaded with ${Math.round(mission.timeLimit - mission.elapsed)}s to spare. Best combo ×${Math.min(2, 1 + 0.25 * (mission.bestCombo - 1)).toFixed(2).replace(/\.?0+$/, '')} (${mission.bestCombo} in a row).`,
           score: mission.score,
         };
         return events | EVENT_COMPLETE;
@@ -197,6 +251,7 @@ export function stepWorld(world, stick, throttleDelta, dt = STEP) {
     } else {
       ring.missed = true;
       mission.ringIndex += 1;
+      mission.combo = 0;
       mission.ringsMissed = (mission.ringsMissed ?? 0) + 1;
       world.message = `RING MISSED — ${mission.rings.length - mission.ringIndex} left`;
       world.messageUntil = world.time + 2;
@@ -235,6 +290,8 @@ export function stepWorld(world, stick, throttleDelta, dt = STEP) {
       plane.pitch = 0;
       plane.roll = 0;
       events |= EVENT_LAND;
+      spawnDust(world.particles, plane.x, plane.y - 0.8, plane.z, { count: 26, spread: 6, life: 1.2 });
+      world.trauma = Math.min(1, world.trauma + 0.22);
       world.message = 'TOUCHDOWN — nice and gentle';
       world.messageUntil = world.time + 2.5;
       // Only the far strip completes a landing sortie: a gentle arrival back on
@@ -259,6 +316,8 @@ export function stepWorld(world, stick, throttleDelta, dt = STEP) {
       plane.grounded = true;
       plane.y = ground + 1.2;
       plane.speed *= 0.75;
+      spawnBurst(world.particles, plane.x, plane.y - 0.5, plane.z, { count: 18, colour: '#ffb02e', spread: 10, life: 0.6, size: 0.4 });
+      world.trauma = Math.min(1, world.trauma + 0.45);
       events |= EVENT_SCRAPE;
       world.message = 'HARD LANDING — airframe damaged';
       world.messageUntil = world.time + 2;
@@ -268,11 +327,16 @@ export function stepWorld(world, stick, throttleDelta, dt = STEP) {
       plane.grounded = true;
       plane.y = ground + 1.2;
       plane.speed *= 0.7;
+      spawnDust(world.particles, plane.x, plane.y - 0.5, plane.z, { count: 20, colour: '#a08b62', spread: 7, life: 1 });
+      world.trauma = Math.min(1, world.trauma + 0.4);
       events |= EVENT_SCRAPE;
       world.message = 'TERRAIN SCRAPE — integrity down';
       world.messageUntil = world.time + 2;
     } else {
       world.phase = 'done';
+      spawnBurst(world.particles, plane.x, plane.y, plane.z, { count: 60, colour: '#ff5a4e', spread: 26, life: 1.3, size: 0.8 });
+      spawnDust(world.particles, plane.x, plane.y, plane.z, { count: 30, colour: '#8a7f72', spread: 10, life: 1.6, size: 1.5 });
+      world.trauma = 1;
       const reason = plane.verticalSpeed <= -4
         ? `Hit the ground at ${Math.round(-plane.verticalSpeed * 3.28)} ft/s down.`
         : `Hit the ridge at ${Math.round(plane.speed * 1.94)} kt.`;

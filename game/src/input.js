@@ -11,6 +11,8 @@ export const ACTION_MISSION_1 = 16;
 export const ACTION_MISSION_2 = 32;
 export const ACTION_MISSION_3 = 64;
 export const ACTION_RESTART = 128;
+export const ACTION_MUTE = 256;
+export const ACTION_MISSION_4 = 512;
 
 /** The keys the game listens to, so the help line and the handler agree. */
 const KEY_ACTIONS = {
@@ -26,8 +28,11 @@ const KEY_ACTIONS = {
   1: ACTION_MISSION_1,
   2: ACTION_MISSION_2,
   3: ACTION_MISSION_3,
+  4: ACTION_MISSION_4,
   r: ACTION_RESTART,
   R: ACTION_RESTART,
+  m: ACTION_MUTE,
+  M: ACTION_MUTE,
 };
 
 /** Create the input for a canvas. Keys are tracked by their `key` value. */

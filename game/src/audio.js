@@ -101,10 +101,25 @@ export function createAudio() {
   return {
     unlock,
     update,
-    /** Two-note chime when a ring is threaded. */
-    ring() {
-      blip(880, 0.18, 'sine', 0.14);
-      setTimeout(() => blip(1318, 0.28, 'sine', 0.14), 90);
+    /** Two-note chime when a ring is threaded; a streak climbs the scale. */
+    ring(combo = 1) {
+      const lift = 1 + Math.min(combo - 1, 8) * 0.06;
+      blip(880 * lift, 0.18, 'sine', 0.14);
+      setTimeout(() => blip(1318 * lift, 0.28, 'sine', 0.14), 90);
+    },
+    /** Distant thunder: a low rumble that rolls and dies, for storm sorties. */
+    thunder() {
+      blip(52, 1.4, 'triangle', 0.16);
+      setTimeout(() => blip(41, 1.8, 'triangle', 0.12), 220);
+    },
+    /** Flip the mute: silenced boards stay silent until flipped back. */
+    toggleMute() {
+      muted = !muted;
+      if (muted) {
+        if (engineGain) engineGain.gain.value = 0;
+        if (windGain) windGain.gain.value = 0;
+      }
+      return muted;
     },
     /** A low thud for a touchdown. */
     thud() {

@@ -10,9 +10,9 @@
 import { BEST_KEY, STEP } from './config.js';
 import { createRandom } from './random.js';
 import { createTerrain } from './terrain.js';
-import { createWorld, EVENT_COMPLETE, EVENT_CRASH, EVENT_FUEL, EVENT_LAND, EVENT_RING, EVENT_SCRAPE, EVENT_STALL, EVENT_TIME, autopilot, resetWorld, stepWorld } from './world.js';
+import { createWorld, EVENT_BOLT, EVENT_COMPLETE, EVENT_CRASH, EVENT_FUEL, EVENT_LAND, EVENT_RING, EVENT_SCRAPE, EVENT_STALL, EVENT_TIME, autopilot, resetWorld, stepWorld } from './world.js';
 import { MISSIONS } from './missions.js';
-import { ACTION_BRAKE, ACTION_CONFIRM, ACTION_FLAPS, ACTION_MISSION_1, ACTION_MISSION_2, ACTION_MISSION_3, ACTION_PAUSE, ACTION_RESTART, createInput } from './input.js';
+import { ACTION_BRAKE, ACTION_CONFIRM, ACTION_FLAPS, ACTION_MISSION_1, ACTION_MISSION_2, ACTION_MISSION_3, ACTION_MISSION_4, ACTION_MUTE, ACTION_PAUSE, ACTION_RESTART, createInput } from './input.js';
 import { createAudio } from './audio.js';
 import { createRenderer } from './render.js';
 import { stageShot } from './shots.js';
@@ -91,7 +91,8 @@ function runGame() {
   }
 
   function handleEvents(events) {
-    if (events & EVENT_RING) audio.ring();
+    if (events & EVENT_RING) audio.ring(world.mission.combo);
+    if (events & EVENT_BOLT) audio.thunder();
     if (events & EVENT_LAND) audio.thud();
     if (events & EVENT_SCRAPE) audio.scrape();
     if (events & EVENT_CRASH) audio.crash();
@@ -116,9 +117,11 @@ function runGame() {
       else if (screen === 'done') startMission(0);
       return;
     }
+    if (actions & ACTION_MUTE) announce(audio.toggleMute() ? 'Sound off.' : 'Sound on.');
     if (actions & ACTION_MISSION_1 && screen !== 'play') startMission(0);
     else if (actions & ACTION_MISSION_2 && screen !== 'play') startMission(1);
     else if (actions & ACTION_MISSION_3 && screen !== 'play') startMission(2);
+    else if (actions & ACTION_MISSION_4 && screen !== 'play' && MISSIONS.length > 3) startMission(3);
     else if (actions & ACTION_CONFIRM && screen === 'title') startMission(0);
     else if (actions & ACTION_CONFIRM && screen === 'done') startMission(0);
     else if (actions & ACTION_RESTART && screen === 'done') startMission(0);
@@ -155,9 +158,16 @@ function runGame() {
 
   function frame(now) {
     requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
+    const frameSeconds = Math.min((now - last) / 1000, MAX_FRAME);
+    accumulator += frameSeconds;
     last = now;
     handleActions();
+    // Hit-stop: a threaded ring freezes the world for a breath, so the pass
+    // lands in the hands as well as on the scoreboard.
+    if (world.hitStop > 0) {
+      world.hitStop -= frameSeconds;
+      accumulator = 0;
+    }
     if (screen === 'title' || screen === 'play') {
       while (accumulator >= STEP && (screen === 'title' || screen === 'play')) {
         if (screen === 'title') stepTitle();
@@ -179,7 +189,7 @@ function runGame() {
     }
   });
 
-  announce('Kestrel Run. Press 1, 2 or 3 to pick a sortie, or click to fly.');
+  announce('Kestrel Run. Press 1, 2, 3 or 4 to pick a sortie, or click to fly.');
   requestAnimationFrame(frame);
 }
 

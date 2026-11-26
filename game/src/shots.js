@@ -10,7 +10,7 @@ import { autopilot, resetWorld, stepWorld } from './world.js';
 /** Seconds of flight each staged scene plays before its frame is taken. */
 const SCENE_SECONDS = {
   cover: 46,
-  takeoff: 9,
+  takeoff: 5,
   landing: 22,
   storm: 34,
 };
